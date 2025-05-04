@@ -1,0 +1,8 @@
+lag: 4
+points_per_call: 16
+epochs: 1
+batch_size: 1
+activation: 'relu'
+optimizer: 'adam'
+units: 128
+d_model: 128
