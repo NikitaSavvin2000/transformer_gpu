@@ -12,31 +12,31 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from time2vec import Time2Vec
 from datetime import datetime
 
+# Отключение предупреждений SSL
 ssl._create_default_https_context = ssl._create_stdlib_context
 
-home_path = os.getcwd()
-home_path = f"{home_path}/PhD_experiments/transformer"
-
+# Пути
+home_path = os.path.dirname(os.path.abspath(__file__))
 path_to_db_data = f"{home_path}/last_db_data.csv"
-
 experiments_path = f"{home_path}/experiments"
 dir_name = datetime.now().strftime("exp_%Y-%m-%d_%H-%M-%S")
 BASE_PATH = f"{experiments_path}/{dir_name}"
-
 os.makedirs(BASE_PATH, exist_ok=True)
 params_file = f'{home_path}/params.yaml'
 cur_running_path = f"{home_path}/main.py"
 
-params_path = os.path.join(home_path, params_file)
-params = yaml.load(open(params_path, 'r'), Loader=yaml.SafeLoader)
+# Загрузка параметров
+with open(params_file, 'r') as file:
+    params = yaml.safe_load(file)
 
-lag = params['lag']
-points_per_call = params['points_per_call']
-epochs = params['epochs']
-batch_size = params['batch_size']
-activation = params['activation']
-
+lag = params.get('lag', 4)
+points_per_call = params.get('points_per_call', 16)
+epochs = params.get('epochs', 1)
+batch_size = params.get('batch_size', 1)
+activation = params.get('activation', 'relu')
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipnorm=1.0)
+minutes_for_test = params.get('minutes_for_test', 1440)
+
 
 def split_sequence(sequence, n_steps, horizon):
     X, y = [], []
@@ -50,16 +50,17 @@ def split_sequence(sequence, n_steps, horizon):
         y.append(seq_y)
     return np.array(X), np.array(y)
 
+
 # Позиционное кодирование
 class PositionalEncoding(tf.keras.layers.Layer):
     def __init__(self, position, d_model):
         super(PositionalEncoding, self).__init__()
         self.pos_encoding = self.positional_encoding(position, d_model)
-    
+
     def get_angles(self, position, i, d_model):
         angles = 1 / tf.pow(10000., (2 * (i // 2)) / tf.cast(d_model, tf.float32))
         return position * angles
-    
+
     def positional_encoding(self, position, d_model):
         angle_rads = self.get_angles(
             position=tf.range(position, dtype=tf.float32)[:, tf.newaxis],
@@ -71,13 +72,14 @@ class PositionalEncoding(tf.keras.layers.Layer):
         pos_encoding = tf.concat([sines, cosines], axis=-1)
         pos_encoding = pos_encoding[tf.newaxis, ...]
         return tf.cast(pos_encoding, tf.float32)
-    
+
     def call(self, inputs):
         if isinstance(inputs, tf.SparseTensor):
             inputs = tf.sparse.to_dense(inputs)
         seq_len = tf.shape(inputs)[1]
         pos_encoding_slice = self.pos_encoding[:, :seq_len, :]
         return inputs + tf.cast(pos_encoding_slice, dtype=inputs.dtype)
+
 
 # Слой энкодера
 def encoder_layer(units, d_model, num_heads, dropout, name="encoder_layer"):
@@ -91,6 +93,7 @@ def encoder_layer(units, d_model, num_heads, dropout, name="encoder_layer"):
     outputs = Dropout(dropout)(outputs)
     outputs = LayerNormalization(epsilon=1e-6)(attention + outputs)
     return Model(inputs=inputs, outputs=outputs, name=name)
+
 
 # Слой декодера
 def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
@@ -111,28 +114,27 @@ def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
     outputs = LayerNormalization(epsilon=1e-6)(attention2 + outputs)
     return Model(inputs=[inputs, enc_outputs], outputs=outputs, name=name)
 
+
 # Модель Transformer
 def transformer(input_dim, num_layers, units, d_model, num_heads, dropout, points_per_call, name="transformer"):
     inputs = Input(shape=(None, input_dim), name="inputs")
     dec_inputs = Input(shape=(None, 1), name="dec_inputs")
-    
     embeddings = Dense(d_model)(inputs)
     embeddings = PositionalEncoding(1000, d_model)(embeddings)
-    
     enc_outputs = embeddings
     for i in range(num_layers):
-        enc_outputs = encoder_layer(units=units, d_model=d_model, num_heads=num_heads, dropout=dropout, name=f"encoder_layer_{i}")(enc_outputs)
-    
+        enc_outputs = encoder_layer(units=units, d_model=d_model, num_heads=num_heads, dropout=dropout,
+                                   name=f"encoder_layer_{i}")(enc_outputs)
     dec_embeddings = Dense(d_model)(dec_inputs)
     dec_embeddings = PositionalEncoding(1000, d_model)(dec_embeddings)
-    
     outputs = dec_embeddings
     for i in range(num_layers):
-        outputs = decoder_layer(units=units, d_model=d_model, num_heads=num_heads, dropout=dropout, name=f"decoder_layer_{i}")([outputs, enc_outputs])
-    
+        outputs = decoder_layer(units=units, d_model=d_model, num_heads=num_heads, dropout=dropout,
+                                name=f"decoder_layer_{i}")([outputs, enc_outputs])
     outputs = outputs[:, -1, :]
     outputs = Dense(points_per_call, name="outputs_dense")(outputs)
     return Model(inputs=[inputs, dec_inputs], outputs=outputs, name=name)
+
 
 # Цикл обучения
 def train_transformer(df_train, df_test, lag, points_per_call, epochs, batch_size):
@@ -145,65 +147,64 @@ def train_transformer(df_train, df_test, lag, points_per_call, epochs, batch_siz
             except Exception:
                 df_train = df_train.drop(columns=[col])
                 df_test = df_test.drop(columns=[col])
-    
+
     # Обработка пропущенных значений
     df_train = df_train.ffill().bfill()
     df_test = df_test.ffill().bfill()
-    
+
     # Нормализация данных
     scaler = MinMaxScaler()
     df_train = pd.DataFrame(scaler.fit_transform(df_train), columns=df_train.columns)
     df_test = pd.DataFrame(scaler.transform(df_test), columns=df_test.columns)
-    
+
     values = df_train.values
     X, y = split_sequence(values, lag, points_per_call)
-    
     X = X.astype(np.float32)
     y = y.astype(np.float32)
-    
     dec_inputs = X[:, :-1, 0]
     dec_inputs = np.expand_dims(dec_inputs, axis=-1)
-    
     input_dim = X.shape[2]
+
     num_layers = 4
     units = 512
     d_model = 128
     num_heads = 8
     dropout = 0.1
-    
+
     model = transformer(input_dim, num_layers, units, d_model, num_heads, dropout, points_per_call)
     model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mae'])
+
     history = model.fit([X, dec_inputs], y, epochs=epochs, batch_size=batch_size, verbose=1)
     return model, history
 
+
 if __name__ == "__main__":
-    
-    # df_all_data = fetch_data_from_db()
     df_all_data = pd.read_csv(path_to_db_data)
-    df_all_data = df_all_data.iloc[:5000]
-    print(df_all_data)
-    
-    df_all_data['datetime'] = pd.to_datetime(df_all_data['datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-    
+    df_all_data = df_all_data.iloc[:5000]  # можно убрать для полного набора
+    df_all_data['datetime'] = pd.to_datetime(df_all_data['datetime'])
     col_time = 'datetime'
     col_target = 'load_consumption'
-    
-    t2v = Time2Vec(col_time, col_target)
 
+    # Векторизация всей таблицы
+    t2v = Time2Vec(col_time, col_target)
     df_vectorized, min_val, max_val = t2v.vectorization(df_all_data)
 
-    train_index = int(len(df_vectorized) * 0.8)
-    df_train = df_vectorized.iloc[:train_index]
-    df_test = df_vectorized.iloc[train_index:]
-    
-    df_train = df_train.select_dtypes(include=[np.number])
-    df_test = df_test.select_dtypes(include=[np.number])
-    
-    df_train = df_train.ffill().bfill().astype(float)
-    df_test = df_test.ffill().bfill().astype(float)
-    
+    # Сортировка по времени
+    df_vectorized = df_vectorized.sort_values(by=col_time).reset_index(drop=True)
+
+    # Разделение: последние N минут — тест, остальное — трейн
+    last_timestamp = df_vectorized[col_time].max()
+    test_start_time = last_timestamp - pd.Timedelta(minutes=minutes_for_test)
+    df_test = df_vectorized[df_vectorized[col_time] >= test_start_time].copy()
+    df_train = df_vectorized[df_vectorized[col_time] < test_start_time].copy()
+
+    # Очистка от ненужных колонок и заполнение пропусков
+    df_train = df_train.select_dtypes(include=[np.number]).ffill().bfill().astype(float)
+    df_test = df_test.select_dtypes(include=[np.number]).ffill().bfill().astype(float)
+
+    print(f"Train shape: {df_train.shape}, Test shape: {df_test.shape}")
+
     model, history = train_transformer(df_train, df_test, lag, points_per_call, epochs, batch_size)
-    
     model_save_path = f"{BASE_PATH}/transformer_model.keras"
     model.save(model_save_path)
 
@@ -215,54 +216,36 @@ if __name__ == "__main__":
     for _ in range(len(df_test) - lag):
         pred = model.predict([encoder_input, decoder_input], verbose=0)
         predictions.append(pred.flatten())
-        
         next_encoder_input = df_test.values[lag + len(predictions) - 1].reshape((1, 1, df_test.shape[1]))
         encoder_input = np.concatenate([encoder_input[:, 1:, :], next_encoder_input], axis=1)
-        
         next_decoder_input = pred[:, -1].reshape((1, 1, 1))
         decoder_input = np.concatenate([decoder_input[:, 1:, :], next_decoder_input], axis=1)
 
-    # print(predictions)
     predict_values = np.concatenate(predictions, axis=0)
 
+    # График предсказаний
     import plotly.graph_objects as go
-    import numpy as np
-    
     fig = go.Figure()
-    
-    # Добавляем линию с предсказанными значениями
-    fig.add_trace(go.Scatter(
-        y=predict_values,
-        mode='lines',
-        name='Предсказанные значения',
-        line=dict(color='blue')
-    ))
-    
-    # Настраиваем layout графика
-    fig.update_layout(
-        title='График предсказанных значений',
-        xaxis_title='Индекс',
-        yaxis_title='Значение',
-        showlegend=True
-    )
-    
-    # Сохраняем график в HTML файл
-
+    fig.add_trace(go.Scatter(y=predict_values, mode='lines', name='Предсказанные значения'))
+    fig.update_layout(title='График предсказанных значений', xaxis_title='Индекс', yaxis_title='Значение')
     predictions_plot = os.path.join(BASE_PATH, 'predictions_plot.html')
     fig.write_html(predictions_plot)
 
-    print(predict_values)
-    df_test_lagged = df_test.iloc[-lag:].copy()
-    print(df_test_lagged)
-    df_test_lagged['load_consumption'] = predict_values
+    print(f"len(df_test): {len(df_test)}")
+    print(f"len(predict_values): {len(predict_values)}")
 
+    predict_values_subset = predict_values[:len(df_test)]
+
+    # Теперь можно безопасно добавить в DataFrame
+    df_test_lagged = df_test.iloc[-len(predict_values_subset):].copy()
+    df_test_lagged['load_consumption'] = predict_values_subset
     df_comparative = t2v.reverse_vectorization(df=df_test_lagged, min_val=min_val, max_val=max_val)
-    
-    y_true = t2v.reverse_vectorization(df=df_test.iloc[lag:], min_val=min_val, max_val=max_val)
 
-    y_true = y_true['load_consumption']
+    # Истинные значения
+    y_true = t2v.reverse_vectorization(df=df_test.iloc[lag:], min_val=min_val, max_val=max_val)['load_consumption']
 
-    y_pred = df_comparative['load_consumption']
+    # Предсказания
+    y_pred = df_comparative['load_consumption'][:len(y_true)]  # обрезаем под длину y_true
 
     # Вычисление метрик
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
@@ -270,7 +253,7 @@ if __name__ == "__main__":
     r2 = 1 - (np.sum((y_true - y_pred) ** 2) / np.sum((y_true - y_true.mean()) ** 2))
     mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
     wmape = np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true)) * 100
-    
+
     metrics = {
         "RMSE": rmse,
         "MAE": mae,
@@ -278,12 +261,11 @@ if __name__ == "__main__":
         "MAPE": mape,
         "WMAPE": wmape
     }
-    
+
     df_metrics = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Value'])
     df_metrics.to_csv(f"{BASE_PATH}/metrics.csv", index=False)
-    
+
     df_comparative.to_csv(f"{BASE_PATH}/predictions.csv", index=False)
-    
-    destination_snapshot = os.path.join(BASE_PATH, 'snapshot_main.py')
-    shutil.copy(cur_running_path, destination_snapshot)
+    shutil.copy(cur_running_path, os.path.join(BASE_PATH, 'snapshot_main.py'))
+
     print("Обучение завершено. Результаты сохранены.")

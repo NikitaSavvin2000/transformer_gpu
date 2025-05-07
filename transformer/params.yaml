@@ -6,3 +6,4 @@ activation: 'relu'
 optimizer: 'adam'
 units: 128
 d_model: 128
+minutes_for_test: 1440

@@ -1,0 +1,11 @@
+pandas>=2.0
+numpy>=1.21
+tensorflow>=2.10
+scikit-learn>=1.0
+pyyaml>=6.0
+plotly>=5.0
+ephem>=4.0
+pyephem>=9.0
+psycopg2-binary>=2.9
+requests>=2.30
+python-dotenv>=1.0
